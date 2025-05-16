@@ -1,3 +1,17 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# **NOTE:** I managed to get an LB of 0.0052 with this code, but due to some randomness still in the script, the score varies between 0.016 and 0.005. Using some form of kfold-validation reduces this variance.
+# 
+# **EDIT:** I would run this somewhere other than Kaggle locally for 150 epochs instead of 89 like I have it set to below; 89 is the best I could do without the script timing out.
+# 
+# # The Idea
+# 
+# I started this competition by simply feeding the pre-extracted features into a multi-layer perceptron with one hidden layer and got surprisingly good results, but I still had all this image data that I wasn't using. My immediate thought then was to simply combine a convolutional neural network on the images with the pre-extracted features MLP and train the entire model end to end. Keras's functional API gives us a really easy way to do this. Below, I'll outline the process of getting this model working along, point out some nice resources to learning about convolutional nets, and do some visualization of what the neural network is actually doing. But before we do that, let's just get all the data loading out of the way.
+
+
+
+
 import os
 
 import numpy as np
@@ -5,10 +19,6 @@ import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedShuffleSplit
-from tensorflow.keras.metrics import Precision
-
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Dense, Dropout, Activation, Conv2D, MaxPooling2D, Flatten, Input, Concatenate
 
 # If you want to use Theano, all you need to change
 # is the dim ordering whenever you are dealing with
@@ -17,49 +27,45 @@ from tensorflow.keras.layers import Dense, Dropout, Activation, Conv2D, MaxPooli
 # (samples, channels, rows, cols)
 
 # Keras stuff
-from tensorflow.keras.utils import to_categorical
+from keras.utils.np_utils import to_categorical
 from keras.preprocessing.image import img_to_array, load_img
 
 # A large amount of the data loading code is based on najeebkhan's kernel
 # Check it out at https://www.kaggle.com/najeebkhan/leaf-classification/neural-network-through-keras
-root = './'
+root = '../input'
 np.random.seed(2016)
 split_random_state = 7
 split = .9
-print(os.path.join(root, 'train.csv'))
+
 
 def load_numeric_training(standardize=True):
     """
-    Loads only the 'texture' feature for the training data.
+    Loads the pre-extracted features for the training data
+    and returns a tuple of the image ids, the data, and the labels
     """
+    # Read data from the CSV file
     data = pd.read_csv(os.path.join(root, 'train.csv'))
     ID = data.pop('id')
 
-    # ラベルを数値に変換
+    # Since the labels are textual, so we encode them categorically
     y = data.pop('species')
     y = LabelEncoder().fit(y).transform(y)
-
-    # 'texture' だけを使用
-    texture_cols = [f'texture{i}' for i in range(1, 65)]
-    texture = data[texture_cols].values
-    X = StandardScaler().fit_transform(texture) if standardize else texture
+    # standardize the data by setting the mean to 0 and std to 1
+    X = StandardScaler().fit(data).transform(data) if standardize else data.values
 
     return ID, X, y
 
 
-
 def load_numeric_test(standardize=True):
-    data = pd.read_csv("test.csv")
+    """
+    Loads the pre-extracted features for the test data
+    and returns a tuple of the image ids, the data
+    """
     test = pd.read_csv(os.path.join(root, 'test.csv'))
     ID = test.pop('id')
-
-    # 'texture' だけを使用
-    texture_cols = [f'texture{i}' for i in range(1, 65)]
-    texture = data[texture_cols].values
-    test_data = StandardScaler().fit_transform(texture) if standardize else texture
-
-    return ID, test_data
-
+    # standardize the data by setting the mean to 0 and std to 1
+    test = StandardScaler().fit(test).transform(test) if standardize else test.values
+    return ID, test
 
 
 def resize_img(img, max_dim=96):
@@ -87,7 +93,7 @@ def load_image_data(ids, max_dim=96, center=True):
     # X = np.empty((len(ids), 1, max_dim, max_dim)) # uncomment this
     for i, idee in enumerate(ids):
         # Turn the image into an array
-        x = resize_img(load_img(os.path.join(root, 'images', str(idee) + '.jpg'), color_mode="grayscale"), max_dim=max_dim)
+        x = resize_img(load_img(os.path.join(root, 'images', str(idee) + '.jpg'), grayscale=True), max_dim=max_dim)
         x = img_to_array(x)
         # Get the corners of the bounding box for the image
         # NOTE: Theano users comment the two lines below and
@@ -149,7 +155,19 @@ y_tr_cat = to_categorical(y_tr)
 y_val_cat = to_categorical(y_val)
 print('Training data loaded!')
 
-from tensorflow.keras.preprocessing.image import ImageDataGenerator, NumpyArrayIterator, array_to_img
+
+# # Data Augmentation
+# 
+# One trick we are going to use to improve the robustness of our model is image data augmentation, allowing it to perform better on the test set. 
+# 
+# If you take a look at [Rhyando Anggoro Adi's post](https://www.kaggle.com/c/leaf-classification/forums/t/24764/create-gif-based-on-leaf-class) on the forum containing a GIF of each training sample for each species, you'll notice that for a given species most of the leaves look very similar except that the leaf is rotated slightly or is slightly larger in scale. We'll try to emphasize this in our dataset by randomly performing a rotation or zoom transformation to each leaf image as the image is passed to the neural network. Below is the code for the data augmentation image generator along with a slight change to the source code to help us out later on.
+# 
+# **NOTE:** the change to the source code is not the only way to get around the problem of matching the indices of our two inputs (images and pre-extracted features). You can also manually shuffle the indices, set the shuffle parameter for the ImageDataGenerator to False, and flow the generator from the manually shuffled images.
+
+
+
+
+from keras.preprocessing.image import ImageDataGenerator, NumpyArrayIterator, array_to_img
 
 # A little hacky piece of code to get access to the indices of the images
 # the data augmenter is working with.
@@ -159,7 +177,7 @@ class ImageDataGenerator2(ImageDataGenerator):
         return NumpyArrayIterator2(
             X, y, self,
             batch_size=batch_size, shuffle=shuffle, seed=seed,
-            data_format=self.data_format,
+            dim_ordering=self.dim_ordering,
             save_to_dir=save_to_dir, save_prefix=save_prefix, save_format=save_format)
 
 
@@ -181,7 +199,7 @@ class NumpyArrayIterator2(NumpyArrayIterator):
             batch_x[i] = x
         if self.save_to_dir:
             for i in range(current_batch_size):
-                img = array_to_img(batch_x[i], scale=True)
+                img = array_to_img(batch_x[i], self.dim_ordering, scale=True)
                 fname = '{prefix}_{index}_{hash}.{format}'.format(prefix=self.save_prefix,
                                                                   index=current_index + i,
                                                                   hash=np.random.randint(1e4),
@@ -199,8 +217,31 @@ imgen = ImageDataGenerator2(
     horizontal_flip=True,
     vertical_flip=True,
     fill_mode='nearest')
-imgen_train = imgen.flow(X_img_tr, y_tr_cat,batch_size=32, seed=np.random.randint(1, 10000))
+imgen_train = imgen.flow(X_img_tr, y_tr_cat, seed=np.random.randint(1, 10000))
 print('Finished making data augmenter...')
+
+
+# # Combining the Image CNN with the Pre-Extracted Features MLP
+# 
+# Now that we've gotten all the data preparation work out of the way, we can actually construct our model.
+# 
+# ## Wait!! I don't know what a convolutional neural network is!
+# 
+# No worries! I've linked below a few great places to get an overview of convnets. You can find more by just googling "convolutional neural network explained".
+# 
+# * http://cs231n.github.io/convolutional-networks/
+# * https://ujjwalkarn.me/2016/08/11/intuitive-explanation-convnets/
+# * http://neuralnetworksanddeeplearning.com/chap6.html
+# 
+# ## Keras Functional API
+# 
+# For basic neural network architectures we can use Keras's Sequential API, but since we need to build a model that takes two different inputs (image and pre-extracted features) in two different locations in the model, we won't be able to use the Sequential API. Instead, we'll be using the Functional API. This API is just as straightforward, but instead of having a model we add layers to, we'll instead be passing an array through a layer, and passing that output through another layer, and so on. You can think of each layer as a function and the array we give it as its argument. Click [here](https://keras.io/getting-started/functional-api-guide/) for more info about the functional API.
+
+
+
+
+from keras.models import Model
+from keras.layers import Dense, Dropout, Activation, Convolution2D, MaxPooling2D, Flatten, Input, merge
 
 
 def combined_model():
@@ -208,21 +249,21 @@ def combined_model():
     # Define the image input
     image = Input(shape=(96, 96, 1), name='image')
     # Pass it through the first convolutional layer
-    x = Conv2D(8, kernel_size=(5, 5), padding='same')(image)
+    x = Convolution2D(8, 5, 5, input_shape=(96, 96, 1), border_mode='same')(image)
     x = (Activation('relu'))(x)
     x = (MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))(x)
 
     # Now through the second convolutional layer
-    x = (Conv2D(32, 5, 5, padding='same'))(x)
+    x = (Convolution2D(32, 5, 5, border_mode='same'))(x)
     x = (Activation('relu'))(x)
     x = (MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))(x)
 
     # Flatten our array
     x = Flatten()(x)
     # Define the pre-extracted feature input
-    numerical = Input(shape=(64,), name='numerical')
+    numerical = Input(shape=(192,), name='numerical')
     # Concatenate the output of our convnet with our pre-extracted feature input
-    concatenated = Concatenate()([x, numerical])
+    concatenated = merge([x, numerical], mode='concat')
 
     # Add a fully connected layer just like in a normal MLP
     x = Dense(100, activation='relu')(concatenated)
@@ -231,25 +272,26 @@ def combined_model():
     # Get the final output
     out = Dense(99, activation='softmax')(x)
     # How we create models with the Functional API
-    model = Model(inputs=[image, numerical], outputs=out)
-    model.compile(
-        loss='categorical_crossentropy',
-        optimizer=RMSprop(learning_rate=0.0005),
-        metrics=['accuracy', Precision(name='precision')]
-    )
-    return model
+    model = Model(input=[image, numerical], output=out)
+    model.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
 
+    return model
 
 print('Creating the model...')
 model = combined_model()
 print('Model created!')
 
+
+# Now we're finally ready to actually train the model! Running on Kaggle will take a while. It's MUCH faster to run it locally if you have a GPU, or on an AWS instance with a GPU.
+
+
+
+
 from keras.callbacks import ModelCheckpoint
-from tensorflow.keras.models import load_model
+from keras.models import load_model
 
 
-
-def combined_generator(imgen, X_num):
+def combined_generator(imgen, X):
     """
     A generator to train our keras neural network. It
     takes the image augmenter generator and the array
@@ -257,55 +299,38 @@ def combined_generator(imgen, X_num):
     It yields a minibatch and will run indefinitely
     """
     while True:
-        # Get the image batch and labels
-        batch_img, batch_y = next(imgen)
-        # This is where that change to the source code we
-        # made will come in handy. We can now access the indicies
-        # of the images that imgen gave us.
-        indices = imgen.index_array[:len(batch_y)]
-        x_batch = X_num[indices]
-        yield ((batch_img, x_batch), batch_y)
+        for i in range(X.shape[0]):
+            # Get the image batch and labels
+            batch_img, batch_y = next(imgen)
+            # This is where that change to the source code we
+            # made will come in handy. We can now access the indicies
+            # of the images that imgen gave us.
+            x = X[imgen.index_array]
+            yield [batch_img, x], batch_y
 
 # autosave best Model
-best_model_file = "leafnet.keras"
+best_model_file = "leafnet.h5"
 best_model = ModelCheckpoint(best_model_file, monitor='val_loss', verbose=1, save_best_only=True)
 
 print('Training model...')
-batch_size = imgen_train.batch_size
-history = model.fit(combined_generator(imgen_train, X_num_tr),
-                              steps_per_epoch=len(X_num_tr),
-                              epochs=89,
+history = model.fit_generator(combined_generator(imgen_train, X_num_tr),
+                              samples_per_epoch=X_num_tr.shape[0],
+                              nb_epoch=89,
                               validation_data=([X_img_val, X_num_val], y_val_cat),
-                              validation_steps=len(X_num_val),
-                              verbose=1,
+                              nb_val_samples=X_num_val.shape[0],
+                              verbose=0,
                               callbacks=[best_model])
-
-import matplotlib.pyplot as plt
-
-# 訓練損失と検証損失を取得
-train_loss = history.history['loss']
-val_loss = history.history['val_loss']
-
-# エポック数を取得
-epochs = range(1, len(train_loss) + 1)
-
-# グラフのプロット
-plt.figure(figsize=(8, 6))
-plt.plot(epochs, train_loss, label='Training Loss', color='blue', linestyle='-', marker='o')
-plt.plot(epochs, val_loss, label='Validation Loss', color='red', linestyle='-', marker='o')
-plt.title('Training and Validation Loss')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.legend()
-plt.grid(True)
-plt.show()
 
 print('Loading the best model...')
 model = load_model(best_model_file)
 print('Best Model loaded!')
 
-from tensorflow.keras.models import load_model
-model = load_model("leafnet.keras")
+
+# And now we create our submission. From the last version's submission created from running this on Kaggle I got a 0.01672 LB, but I had managed to get a 0.00520 LB score with this exact same code after running for 100 epochs (though the best model occurred at the 89th epoch for me) on an AWS p2.xlarge instance. I did set the random seeds but there is still randomness somewhere. This variance in the results could definitely be improved upon with some k-fold validation, but I'll leave the implementation up to the reader.
+
+
+
+
 # Get the names of the column headers
 LABELS = sorted(pd.read_csv(os.path.join(root, 'train.csv')).species.unique())
 
@@ -318,13 +343,20 @@ yPred = pd.DataFrame(yPred_proba,index=index,columns=LABELS)
 
 print('Creating and writing submission...')
 fp = open('submit.csv', 'w')
-fp.write(yPred.to_csv(float_format='%.5f'))
+fp.write(yPred.to_csv())
 print('Finished writing submission')
 # Display the submission
 yPred.tail()
 
 
-yPred_proba.max(axis=1).mean()
+# # Visualization
+# 
+# Great! So we've got our combined model working that incorporates both the raw binary images of the leaves and the pre-extracted features. But you might ask now, what is the neural network actually learning? One easy way to tell what the convolutional portion of the neural net is learning is through visualization of the hidden layers. First, we'll pick a few random leaves from our validation set and we'll pass each one through the neural network. As the leaf goes through, the convolutional neural net will apply many filters each looking for something in the image. Once the filter is applied we'll grab the new image of the leaf and the white portions of the image will tell us where the filter activated and the black will tell us where it didn't. If you take a look at our architecture for the neural net, you'll notice we created 8 filters for the first convolutional layer and 32 for the second one. Thus, for each leaf image we should get a set of 8 and another set of 32 new images.
+# 
+# To do this in Keras we'll build a Keras function as outlined in the [Keras FAQ](https://keras.io/getting-started/faq/#how-can-i-visualize-the-output-of-an-intermediate-layer).
+
+
+
 
 from math import sqrt
 
@@ -332,7 +364,7 @@ import matplotlib.pyplot as plt
 from keras import backend as K
 
 NUM_LEAVES = 3
-model_fn = 'leafnet.keras'
+model_fn = 'leafnet.h5'
 
 # Function by gcalmettes from http://stackoverflow.com/questions/11159436/multiple-figures-in-a-single-window
 def plot_figures(figures, nrows = 1, ncols=1, titles=False):
@@ -377,23 +409,12 @@ model = load_model(model_fn)
 # Get the convolutional layers
 conv_layers = [layer for layer in model.layers if isinstance(layer, MaxPooling2D)]
 
-# 中間層出力を取り出すためのモデルを作成
-convout_model = Model(inputs=model.input,
-                      outputs=[layer.output for layer in conv_layers])
-
 # Pick random images to visualize
 imgs_to_visualize = np.random.choice(np.arange(0, len(X_img_val)), NUM_LEAVES)
 
 # Use a keras function to extract the conv layer data
-# 畳み込み層またはプーリング層を抽出
-conv_layers = [layer for layer in model.layers if isinstance(layer, MaxPooling2D)]
-
-# 中間層出力を得るためのモデルを作成
-convout_model = Model(inputs=model.input, outputs=[layer.output for layer in conv_layers])
-conv_imgs_filts = convout_model.predict([
-    X_img_val[imgs_to_visualize],     # 画像入力
-    X_num_val[imgs_to_visualize]      # 数値入力
-])
+convout_func = K.function([model.layers[0].input, K.learning_phase()], [layer.output for layer in conv_layers])
+conv_imgs_filts = convout_func([X_img_val[imgs_to_visualize], 0])
 # Also get the prediction so we know what we predicted
 predictions = model.predict([X_img_val[imgs_to_visualize], X_num_val[imgs_to_visualize]])
 
@@ -433,3 +454,11 @@ for img_count, img_to_visualize in enumerate(imgs_to_visualize):
         # fig_dict = {'flt{0}'.format(i): conv_img_filt[i] for i in range(conv_img_filt.shape[-1])} # uncomment this
         plot_figures(fig_dict, *get_dim(len(fig_dict)))
 
+
+# # Conclusion
+# 
+# For the first convolutional layer we can sort of tell that most of the filters are doing edge detection on the leaf. That actually makes a lot of sense since pretty much all of the species specific information of a leaf is stored in the shape of its edge. The second convolutional layer is also mainly edge detection along with some point and edge shape detection I noticed with some leaves that have particularly special shapes. This is actually pretty common with convnets. The first few layers will do really simple stuff like edge and shape detection, but the deeper you go the more abstract it gets. Since we don't really have enough data to go that deep most of our filters look pretty tame. Judging by our LB score though, I think we can assume what it's doing is fairly constructive.
+# 
+# Well, that's all! If you've made it this far that means you've read my first kernel, and I hope it helps if you're stuck and don't know how to improve your score. In addition to questions, I'm very open to any feedback both in general about kernel writing and specifically about this kernel.
+# 
+# ## Thank you for reading!
